@@ -34,7 +34,7 @@ const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
 const response = await fetch(`${API_URL}/auth/login`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ login_id: "...", password: "..." }),
+  body: JSON.stringify({ loginId: "...", password: "..." }),
 });
 const session = await response.json();
 // Keep the token in the app's session/auth store, then:
@@ -82,6 +82,51 @@ The extracted dashboard is also React + Vite, but its current `lib/api.ts` is an
 So the React app can connect at the HTTP/WebSocket transport level, but changing its base URL alone will not make every page work against this API. Build a typed adapter in the React app (or add explicitly versioned compatibility routes here) that maps each page's view model to the source API, and use the source WebSocket protocol for writes and live updates. Do not map a feature to a fake empty list or success response. The current backend has no persisted inventory, attendance, reservations, payroll, accounting, delivery management, customer CRM, marketing, or operations equipment/document modules. Those require domain/schema/API work before those dashboard sections can operate on backend data.
 
 The strongest existing overlaps are menu/categories, orders and bill/payment flow, kitchen tickets, floor/areas/tables, terminals, staff/users, approvals, restaurant settings, and reports. The React dashboard currently includes sections beyond this list. Preserve demo mode as the default until an integration adapter is ready; configure `VITE_API_URL` only after adding that adapter.
+
+### Page-to-backend integration map
+
+This map helps a developer connect the dashboard without confusing similarly named but incompatible endpoints:
+
+| React dashboard area | Closest existing backend capability | Integration approach / status |
+| --- | --- | --- |
+| Dashboard | `GET /overview`, `GET /reports/overview`, `GET /reports/sales` | Map the restaurant-oriented KPI fields into dashboard cards and chart series. These endpoints do not return the demo dashboard's exact DTO. |
+| Menu | `GET /menu`, `GET /menu/search`, `GET /menu/popular`; `/menu/items` and `/menu/categories` management routes | Read the source response shape and map category/item fields. Mutations may be REST for menu management. |
+| Orders and POS | `GET /sync`, `GET /orders`, `GET /orders/:id`, plus WebSocket order and billing actions | Use REST for history/details and WebSocket for live order commands. The preview's `/orders/manage` route is not present. |
+| Kitchen display | `/sync` (role-filtered orders/terminals) plus `chef.*` WebSocket actions | Implement station/ticket view mapping and subscribe to scoped events. The demo `/kds/*` paths are not present. |
+| Tables / floor | `GET /floors`, `/areas`, `/tables`, `/terminals`; table actions over WebSocket | Map floor/area/table DTOs and use server layout/lock rules. Preview `/tables/floors` is not present. |
+| Team | `GET/POST/PATCH/DELETE /users` and user session/OTP routes | Map user/role fields; the UI's `/users/roles` and `/users/departments` endpoints are not present as written. |
+| Reports | `GET /reports/overview`, `/sales`, `/menu`, `/orders`, `/staff`, `/daily` | Build chart/table view models from report responses. Scheduling and arbitrary report exports are not included. |
+| Inventory, attendance, reservations, accounting, delivery, payroll, marketing, operations | No persisted matching API in this extraction | Keep preview fixtures for visual review or add these backend modules in follow-up work. Do not present demo mutations as persisted data. |
+
+This is a starting map, not a DTO specification. Confirm field names, query parameters, and roles in the relevant implementation before writing each adapter.
+
+### Data and state conventions
+
+- Database records are restaurant-scoped. Most identifiers are numeric in the source backend; do not assume the dashboard's demo string IDs can be sent to these routes.
+- The API response shape is defined by route serializers, not by raw SQL column names. Login mixes camelCase request fields with snake_case fields inside `user`; other endpoints also preserve source-specific field names.
+- Order lifecycle and order type values in this backend are lowercase (`dine_in`, `delivery`, `takeaway`) and do not automatically match uppercase frontend fixture values.
+- The backend calculates prices, discounts, taxes, payments, and totals. Treat client totals as display-only and never as authoritative write input.
+- Initial state comes from `/sync`; subsequent state changes arrive as WebSocket events. On reconnect, authenticate again if needed, fetch a fresh snapshot, then resume event handling.
+- Errors are JSON and generally use `{ error: "stable_code", message: "human-readable explanation" }`; preserve the code for UI logic and show the message to the user. Authentication failures may require re-login.
+- Use one API client that adds the bearer token and parses non-2xx responses. Use one WebSocket client that handles reconnect, ping/pong, acknowledgements, and server events. Avoid each page implementing its own auth or socket handling.
+
+## Guide for AI coding assistants
+
+Use this section when asking an AI tool to work in this repository. The checked-in source code is authoritative; this README describes intent and navigation but is not a substitute for implementation details.
+
+1. **Repository purpose:** this folder is the extracted POTKO Express/PostgreSQL/WebSocket backend. The separate React dashboard lives at `../potko-pos`. Do not treat the dashboard's `lib/api.ts` fixtures as production API behavior.
+2. **Source provenance:** the backend code was extracted from `Jonathanvinu2121/potko` at source revision `9a97aa54ec035e0609e9482b998ce5307288264a`. The extraction change is CORS configuration in `src/index.js`; backend schema, handlers, routes, and tests were copied from that revision.
+3. **Before changing an API:** inspect the route or event handler, its validators and permissions, any serializer/scope helper, and the relevant SQL schema/migrations. Search for all callers in the React app. Report a route as unsupported if it does not exist; do not invent an implementation or claim that an empty result is equivalent.
+4. **When adding a domain:** describe the requested UI behavior first, then define persisted entities and ownership, request/response DTOs, permissions, validation, and error cases. Implement a forward-only migration, transaction-safe route/action, scoped publication if realtime is needed, and tests. Update this README and the React adapter together.
+5. **Security and correctness:** scope every query by `restaurant_id` from the verified token; never accept a restaurant identifier from the client as the authority. Enforce permissions on the server. Do not return password/PIN hashes, JWT secrets, private configuration, or data outside the user's scope. Reuse existing bill/order helpers for money and state transitions.
+6. **Do not silently change protocol:** REST path/method, request casing, enum values, response shape, WebSocket message types, and event payloads are public contracts. Coordinate breaking changes with the frontend adapter and update examples/documentation.
+7. **Keep preview honest:** while a React page still reads local fixtures, label it as preview/demo. Do not make fake POST/PATCH/DELETE success results look like saved backend changes.
+
+Useful first reads: `src/index.js` for app wiring; `src/routes/auth.js` for sign-in/setup; `src/routes/sync.js` and `src/scope.js` for snapshot visibility; `src/ws/events.js` and `src/ws/publish.js` for realtime protocol; `src/permissions.js` for authorization; `sql/schema.sql` for persisted data; `sql/migrations/` for schema evolution; `test/` for expected behavior.
+
+### Suggested AI task prompt
+
+> Read `README.md` and inspect the relevant implementation before editing. This repository is the extracted POTKO backend; the React dashboard is in `../potko-pos`. Do not invent routes, DTOs, permissions, or database fields. Compare the requested UI behavior with the actual API first and report mismatches. For implementation, preserve restaurant scoping and server-side permissions, add a forward-only SQL migration when persistence changes, update the React adapter and docs where needed, and add focused backend tests. Summarize changed files, API contract changes, verification performed, and remaining unsupported behavior.
 
 ## REST API inventory
 
